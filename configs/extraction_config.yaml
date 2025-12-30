@@ -1,0 +1,41 @@
+# Phase 1: Triplet Extraction Configuration
+
+# Model configuration
+model: "qwen3-coder:30b"
+ollama_url: "http://localhost:11434/v1"
+
+# Extraction parameters
+extraction:
+  samples_per_paper: 3
+  max_goal_words: 200
+  rubric_items_range: [5, 8]  # Min, max
+  max_reference_words: 500
+
+# Database configuration
+database:
+  path: "/home/user/mcp_servers/polymax-synthesizer/papers.db"
+  output_table: "research_triplets"
+
+# Timeout settings
+timeout:
+  per_paper: 180  # 3 minutes per paper
+
+# Retry logic
+retry:
+  max_attempts: 3
+  backoff: 5  # seconds between retries
+
+# Quality thresholds (for validation)
+quality:
+  min_goal_words: 30
+  max_goal_words: 250
+  min_rubric_items: 4
+  max_rubric_items: 10
+  min_reference_words: 100
+  max_reference_words: 600
+
+# Output configuration
+output:
+  triplets_dir: "outputs/triplets"
+  logs_dir: "outputs/logs"
+  export_json: true

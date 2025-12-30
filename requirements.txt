@@ -1,0 +1,27 @@
+# Core dependencies
+torch>=2.1.0
+transformers>=4.36.0
+peft>=0.7.0
+bitsandbytes>=0.41.0
+trl>=0.7.0
+accelerate>=0.25.0
+
+# RL & training
+datasets>=2.14.0
+tensorboard>=2.14.0
+wandb>=0.16.0  # Optional, for cloud logging
+
+# Database & data
+pyyaml>=6.0
+requests>=2.31.0
+tqdm>=4.66.0
+
+# Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+# Utilities
+numpy>=1.24.0
+pandas>=2.0.0
+matplotlib>=3.7.0
+seaborn>=0.12.0

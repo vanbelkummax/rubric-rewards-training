@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+env/
+*.egg-info/
+dist/
+build/
+
+# PyCharm
+.idea/
+
+# VSCode
+.vscode/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Model weights & cache
+*.bin
+*.safetensors
+models/
+checkpoints/
+~/.cache/huggingface/
+
+# Data
+outputs/
+*.db-journal
+*.sqlite3
+
+# Logs
+*.log
+logs/
+tensorboard/
+
+# Temporary
+*.tmp
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,37 @@
+{
+  "triplet_id": 1,
+  "paper_id": 42,
+  "paper_title": "Img2ST: Imaging to Spatial Transcriptomics Inference with Joint Tissue Morphology and Gene Expression Modeling",
+  "paper_year": 2025,
+  "professor": "Yuankai Huo",
+  "sample_num": 1,
+  "research_goal": "Develop a deep learning framework to predict spatial gene expression at subcellular (2μm) resolution from standard H&E histology images, specifically addressing the challenge of Visium HD data where individual spots capture 1-4 cells.",
+  "rubric": [
+    "Must achieve structural similarity (SSIM) >0.55 on 2μm Visium HD resolution",
+    "Should outperform existing methods (Hist2ST, ST-Net, Tangram) by >5% on SSIM",
+    "Must handle tissue heterogeneity including tumor, stroma, and immune regions",
+    "Should preserve spatial gene correlation structure (Moran's I >0.3)",
+    "Must be computationally efficient (<10 minutes per full tissue section)",
+    "Should generalize across tissue types (colorectal, breast, lung cancer)",
+    "Must work with standard foundation model encoders (Virchow2, Prov-GigaPath)"
+  ],
+  "reference_solution": "The paper proposes Img2ST-Net, which combines a pretrained pathology foundation model encoder (Prov-GigaPath) with a spatial-aware decoder (Hist2ST architecture). The encoder extracts 256×256 pixel patches at 0.5μm/pixel resolution, generating 1536-dimensional feature vectors. The decoder uses a U-Net style architecture with spatial attention mechanisms to predict gene expression for 50 highly variable genes. Training uses mean squared error (MSE) loss with spatial smoothness regularization. The model is validated on 3 colorectal cancer patients with Visium HD data (2μm bins, 50 genes), achieving SSIM of 0.5699 which outperforms Hist2ST baseline (SSIM 0.5342) by 6.7%. Key innovation is freezing the pretrained encoder to leverage learned histology patterns while fine-tuning only the lightweight decoder.",
+  "word_counts": {
+    "goal": 42,
+    "rubric_items": 7,
+    "reference": 142
+  },
+  "extraction_metadata": {
+    "extraction_time_seconds": 47.3,
+    "extractor_model": "qwen3-coder:30b",
+    "extraction_date": "2025-12-30"
+  },
+  "quality_notes": [
+    "✅ Research goal is specific and actionable",
+    "✅ Rubric items are measurable with concrete thresholds",
+    "✅ Rubric covers key challenges: resolution, performance, heterogeneity, efficiency, generalization",
+    "✅ Reference solution accurately describes paper's method",
+    "✅ No hallucinations - all details match paper content",
+    "⚠️ Could add rubric item about interpretability or uncertainty quantification"
+  ]
+}
