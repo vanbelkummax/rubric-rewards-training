@@ -6,6 +6,9 @@ bitsandbytes>=0.41.0
 trl>=0.7.0
 accelerate>=0.25.0
 
+# CRITICAL FIX: Unsloth for 30% VRAM reduction (24GB constraint)
+unsloth[cu121-torch230] @ git+https://github.com/unslothai/unsloth.git
+
 # RL & training
 datasets>=2.14.0
 tensorboard>=2.14.0
@@ -15,6 +18,9 @@ wandb>=0.16.0  # Optional, for cloud logging
 pyyaml>=6.0
 requests>=2.31.0
 tqdm>=4.66.0
+
+# CRITICAL FIX: dirtyjson for robust JSON parsing
+dirtyjson>=1.0.8
 
 # Testing
 pytest>=7.4.0

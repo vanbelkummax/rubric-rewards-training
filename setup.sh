@@ -2,11 +2,12 @@
 # Setup script for rubric rewards training
 # Author: Max Van Belkum
 # Date: 2025-12-30
+# Version: 0.2.0 - Fixed model naming, added Unsloth
 
 set -e  # Exit on error
 
 echo "======================================================"
-echo "Rubric Rewards Training Setup"
+echo "Rubric Rewards Training Setup (v0.2.0)"
 echo "======================================================"
 echo ""
 
@@ -30,7 +31,7 @@ if command -v nvidia-smi &> /dev/null; then
     echo "✓ GPU detected: $gpu_name ($vram_total MB VRAM)"
 
     if [ "$vram_total" -lt 20000 ]; then
-        echo "WARNING: <20GB VRAM detected. QLoRA may not fit. Consider using qwen3:14b"
+        echo "WARNING: <20GB VRAM detected. Unsloth optimizations enabled but may still struggle."
     fi
 else
     echo "ERROR: No GPU detected. This project requires CUDA GPU."
@@ -53,6 +54,7 @@ source venv/bin/activate
 # Install dependencies
 echo ""
 echo "[4/7] Installing Python dependencies..."
+echo "(This includes Unsloth - may take 10-15 minutes)"
 pip install --upgrade pip setuptools wheel
 pip install -r requirements.txt
 echo "✓ Dependencies installed"
@@ -65,38 +67,41 @@ if ! command -v ollama &> /dev/null; then
     exit 1
 fi
 
-# Check if qwen3-coder:30b is available
-if ollama list | grep -q "qwen3-coder:30b"; then
-    echo "✓ qwen3-coder:30b model found"
+# CRITICAL FIX: Check for correct model (Qwen2.5, not Qwen3)
+echo ""
+echo "[6/7] Checking/pulling Qwen2.5-Coder-32B model..."
+if ollama list | grep -q "qwen2.5-coder:32b"; then
+    echo "✓ qwen2.5-coder:32b model found"
 else
-    echo "WARNING: qwen3-coder:30b not found"
-    echo "Pulling model (this will take ~30 minutes for 30GB download)..."
-    ollama pull qwen3-coder:30b
+    echo "Pulling qwen2.5-coder:32b (this will take ~30 minutes for ~18GB download)..."
+    ollama pull qwen2.5-coder:32b
 fi
 
 # Download base model for training
 echo ""
-echo "[6/7] Downloading Qwen2.5-Coder-32B-Instruct from Hugging Face..."
-echo "(This is a ~30GB download, will take 1-2 hours)"
+echo "[7/7] Verifying Qwen2.5-Coder-32B-Instruct from Hugging Face..."
+echo "(Model will be downloaded during first training run)"
 python3 << 'EOF'
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 import os
 
 cache_dir = os.path.expanduser("~/.cache/huggingface")
 model_name = "Qwen/Qwen2.5-Coder-32B-Instruct"
 
-print(f"Downloading to {cache_dir}...")
-tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=cache_dir)
-print("✓ Tokenizer downloaded")
+print(f"Verifying tokenizer access...")
+try:
+    tokenizer = AutoTokenizer.from_pretrained(model_name, cache_dir=cache_dir)
+    print("✓ Tokenizer accessible")
+except Exception as e:
+    print(f"WARNING: Could not access tokenizer: {e}")
+    print("Model will be downloaded during training")
 
-# Note: We don't load the full model here (would take 120GB RAM)
-# It will be loaded in 4-bit during training
-print("✓ Model will be loaded in 4-bit during training")
+print("✓ Model will be loaded in 4-bit with Unsloth during training")
 EOF
 
 # Create directories
 echo ""
-echo "[7/7] Creating output directories..."
+echo "Creating output directories..."
 mkdir -p outputs/{triplets,selected,checkpoints,logs,tensorboard}
 mkdir -p data
 echo "✓ Directories created"
@@ -114,16 +119,24 @@ fi
 # Summary
 echo ""
 echo "======================================================"
-echo "✓ Setup Complete!"
+echo "✓ Setup Complete! (v0.2.0)"
 echo "======================================================"
+echo ""
+echo "CRITICAL FIXES APPLIED:"
+echo "  ✓ Model standardized to Qwen2.5-Coder-32B"
+echo "  ✓ Unsloth installed for VRAM optimization"
+echo "  ✓ dirtyjson for robust JSON parsing"
+echo "  ✓ Parallelization support added"
 echo ""
 echo "Next steps:"
 echo "  1. Activate environment: source venv/bin/activate"
-echo "  2. Run pilot extraction: python scripts/phase1_extract_triplets.py --config configs/extraction_config.yaml --pilot-mode --num-papers 20"
+echo "  2. Run pilot extraction: python scripts/phase1_extract_triplets.py --config configs/extraction_config.yaml --pilot-mode --num-papers 20 --export"
 echo "  3. Review quality in outputs/triplets/"
 echo "  4. Proceed with full extraction if quality ≥7/10"
 echo ""
 echo "Storage usage:"
 du -sh venv ~/.cache/huggingface/hub 2>/dev/null || echo "  (run after downloads complete)"
 echo ""
-echo "Estimated time to start training: Ready!"
+echo "Estimated extraction time:"
+echo "  20 papers (pilot): ~30-45 minutes (2 parallel workers)"
+echo "  830 papers (full): 10-12 hours (2 parallel workers)"

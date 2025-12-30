@@ -1,6 +1,8 @@
 # Phase 3: GRPO Training Configuration
+# Version: 0.2.0 - Added Unsloth, reduced generations for VRAM
 
 # Model configuration
+# CRITICAL FIX: Standardized to Qwen2.5-Coder-32B-Instruct
 model:
   base: "Qwen/Qwen2.5-Coder-32B-Instruct"
   cache_dir: "/home/user/.cache/huggingface"
@@ -26,6 +28,14 @@ qlora:
     - "gate_proj"
     - "up_proj"
     - "down_proj"
+
+# Unsloth optimization (CRITICAL FIX for 24GB VRAM)
+# Reduces memory usage by ~30% through kernel optimizations
+unsloth:
+  enabled: true  # Set to false to disable (not recommended for 24GB)
+  max_seq_length: 4096  # Max sequence length for training
+  use_rslora: true  # Rank-Stabilized LoRA (better convergence)
+  use_gradient_checkpointing: "unsloth"  # Unsloth's optimized checkpointing
 
 # Training arguments (Stage 1)
 training_stage1:
@@ -83,11 +93,16 @@ training_stage2:
 
 # GRPO algorithm parameters
 grpo:
-  num_generations: 4  # N plans per goal
+  # CRITICAL FIX: Reduced from 4 to 2 for VRAM constraints
+  num_generations: 2  # N plans per goal (was 4, reduced for 24GB)
+
   frozen_grader: true
+  # NOTE: Multipass approach for frozen grader on single GPU
+  # Generate → Unload adapters → Grade → Reload → Train
+  multipass_grading: true  # Enable to avoid OOM
 
   # Length control (from paper)
-  max_thinking_tokens: 2048
+  max_thinking_tokens: 1024  # Reduced from 2048 for VRAM
   max_plan_words: 500
   length_penalty: 0.5  # Penalty per excess word
 
@@ -118,3 +133,4 @@ monitoring:
   log_examples_per_epoch: 5
   track_vram: true
   vram_check_interval: 100  # steps
+  vram_alert_threshold: 23000  # MB (alert if >23GB)

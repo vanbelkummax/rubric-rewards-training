@@ -2,6 +2,12 @@
 """
 Phase 1: Extract (goal, rubric, reference) triplets from papers.
 
+CRITICAL FIXES (v0.2.0):
+- Removed full_text truncation (was [:3000], caused hallucinations)
+- Improved JSON parsing with Markdown stripping
+- Added dirtyjson fallback for malformed JSON
+- Added optional parallelization for throughput
+
 Usage:
     # Pilot mode (20 papers for quality review)
     python phase1_extract_triplets.py --config configs/extraction_config.yaml --pilot-mode --num-papers 20
@@ -11,13 +17,17 @@ Usage:
 
 Author: Max Van Belkum
 Date: 2025-12-30
+Version: 0.2.0
 """
 
 import argparse
 import json
 import logging
+import re
 import sqlite3
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -29,6 +39,13 @@ from tqdm import tqdm
 # Add utils to path
 sys.path.append(str(Path(__file__).parent))
 from utils.prompts import EXTRACTOR_PROMPT, EXTRACTION_EXAMPLES
+
+# Optional: dirtyjson for robustness
+try:
+    import dirtyjson
+    HAS_DIRTYJSON = True
+except ImportError:
+    HAS_DIRTYJSON = False
 
 
 class TripletExtractor:
@@ -43,6 +60,7 @@ class TripletExtractor:
         self.ollama_url = self.config['ollama_url']
         self.samples_per_paper = self.config['extraction']['samples_per_paper']
         self.db_path = self.config['database']['path']
+        self.max_workers = self.config.get('parallelization', {}).get('max_workers', 1)
 
         # Setup logging
         log_dir = Path("outputs/logs")
@@ -57,9 +75,10 @@ class TripletExtractor:
             ]
         )
         self.logger = logging.getLogger(__name__)
+        self.logger.info(f"Initialized TripletExtractor v0.2.0 with model: {self.model}")
 
         # Connect to database
-        self.conn = sqlite3.connect(self.db_path)
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
 
         # Create output table if needed
@@ -78,6 +97,7 @@ class TripletExtractor:
             extractor_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
             extraction_time_seconds REAL,
             word_counts JSON,
+            full_text_length INTEGER,
             UNIQUE(paper_id, sample_num)
         )
         """
@@ -108,8 +128,13 @@ class TripletExtractor:
 
         return papers
 
-    def get_paper_content(self, paper_id: int) -> Tuple[Optional[str], Optional[str]]:
-        """Get paper summary and full text from paper_extractions table."""
+    def get_paper_content(self, paper_id: int) -> Tuple[Optional[str], Optional[str], int]:
+        """
+        Get paper summary and FULL TEXT from paper_extractions table.
+
+        CRITICAL FIX (v0.2.0): NO TRUNCATION to prevent hallucinations.
+        Returns full_text_length for tracking.
+        """
         # Try to get summary
         summary_query = """
         SELECT content FROM paper_summaries
@@ -120,7 +145,8 @@ class TripletExtractor:
         summary_row = cursor.fetchone()
         summary = summary_row['content'] if summary_row else None
 
-        # Try to get full text from extractions (methods section preferred)
+        # Get FULL TEXT from extractions (methods section prioritized)
+        # CRITICAL: No truncation - we need full methods for accurate reference solutions
         fulltext_query = """
         SELECT section, content FROM paper_extractions
         WHERE paper_id = ?
@@ -128,19 +154,68 @@ class TripletExtractor:
             CASE
                 WHEN section LIKE '%method%' THEN 1
                 WHEN section LIKE '%result%' THEN 2
-                ELSE 3
+                WHEN section LIKE '%introduction%' THEN 3
+                ELSE 4
             END
-        LIMIT 5
+        LIMIT 10
         """
         cursor = self.conn.execute(fulltext_query, (paper_id,))
         fulltext_rows = cursor.fetchall()
 
         if fulltext_rows:
             full_text = "\n\n".join([f"[{row['section']}]\n{row['content']}" for row in fulltext_rows])
+            full_text_length = len(full_text)
         else:
             full_text = None
+            full_text_length = 0
 
-        return summary, full_text
+        return summary, full_text, full_text_length
+
+    def _strip_markdown_code_blocks(self, text: str) -> str:
+        """
+        Remove Markdown code blocks that LLMs often add.
+
+        CRITICAL FIX (v0.2.0): Handles ```json blocks.
+        """
+        # Remove ```json ... ``` blocks
+        text = re.sub(r'```json\s*', '', text)
+        text = re.sub(r'```\s*', '', text)
+        return text.strip()
+
+    def _extract_json_from_response(self, response: str) -> Optional[str]:
+        """
+        Robustly extract JSON from LLM response.
+
+        CRITICAL FIX (v0.2.0): Handles Markdown, nested braces, and malformed JSON.
+        """
+        # Strip Markdown code blocks
+        cleaned = self._strip_markdown_code_blocks(response)
+
+        # Try to find JSON object
+        json_start = cleaned.find('{')
+        if json_start == -1:
+            return None
+
+        # Find matching closing brace (handle nesting)
+        brace_count = 0
+        json_end = -1
+        for i in range(json_start, len(cleaned)):
+            if cleaned[i] == '{':
+                brace_count += 1
+            elif cleaned[i] == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    json_end = i + 1
+                    break
+
+        if json_end == -1:
+            # Fallback to rfind if no matching brace
+            json_end = cleaned.rfind('}') + 1
+
+        if json_end <= json_start:
+            return None
+
+        return cleaned[json_start:json_end]
 
     def call_ollama(self, prompt: str, timeout: int = 180) -> Optional[str]:
         """Call Ollama API with retry logic."""
@@ -155,7 +230,7 @@ class TripletExtractor:
                         "model": self.model,
                         "messages": [{"role": "user", "content": prompt}],
                         "temperature": 0.7,
-                        "max_tokens": 4096
+                        "max_tokens": 8192  # Increased for longer outputs
                     },
                     timeout=timeout
                 )
@@ -182,14 +257,17 @@ class TripletExtractor:
         """Extract triplets from a single paper."""
         paper_id = paper['id']
 
-        # Get paper content
-        summary, full_text = self.get_paper_content(paper_id)
+        # Get paper content (NO TRUNCATION)
+        summary, full_text, full_text_length = self.get_paper_content(paper_id)
 
         if not summary and not full_text:
             self.logger.warning(f"No content found for paper {paper_id}: {paper['title']}")
             return None
 
-        # Format prompt
+        # Log full text length for tracking
+        self.logger.debug(f"Paper {paper_id}: full_text length = {full_text_length} chars")
+
+        # Format prompt with FULL CONTEXT
         prompt = EXTRACTOR_PROMPT.format(
             num_samples=self.samples_per_paper,
             title=paper['title'],
@@ -197,7 +275,7 @@ class TripletExtractor:
             year=paper.get('year', 'Unknown'),
             journal=paper.get('journal', 'Unknown'),
             summary=summary or "No summary available",
-            full_text=full_text[:3000] if full_text else "No full text available"  # Truncate if too long
+            full_text=full_text or "No full text available"  # NO TRUNCATION
         )
 
         # Call LLM
@@ -209,16 +287,22 @@ class TripletExtractor:
             self.logger.error(f"Failed to get response for paper {paper_id}")
             return None
 
-        # Parse JSON response
+        # Parse JSON response (ROBUST)
         try:
-            # Try to extract JSON from response (handles cases where LLM adds text)
-            json_start = response.find('{')
-            json_end = response.rfind('}') + 1
-            if json_start == -1 or json_end == 0:
+            json_str = self._extract_json_from_response(response)
+            if not json_str:
                 raise ValueError("No JSON found in response")
 
-            json_str = response[json_start:json_end]
-            data = json.loads(json_str)
+            # Try standard json.loads first
+            try:
+                data = json.loads(json_str)
+            except json.JSONDecodeError:
+                # Fallback to dirtyjson if available
+                if HAS_DIRTYJSON:
+                    self.logger.warning(f"Standard JSON parse failed for paper {paper_id}, trying dirtyjson")
+                    data = dirtyjson.loads(json_str)
+                else:
+                    raise
 
             samples = data.get('samples', [])
 
@@ -230,6 +314,7 @@ class TripletExtractor:
             # Add metadata
             for sample in samples:
                 sample['extraction_time_seconds'] = extraction_time
+                sample['full_text_length'] = full_text_length
                 sample['word_counts'] = {
                     'goal': len(sample['research_goal'].split()),
                     'rubric_items': len(sample['rubric']),
@@ -240,7 +325,7 @@ class TripletExtractor:
 
         except json.JSONDecodeError as e:
             self.logger.error(f"Failed to parse JSON for paper {paper_id}: {e}")
-            self.logger.debug(f"Raw response: {response[:500]}")
+            self.logger.debug(f"Extracted JSON string: {json_str[:500] if json_str else 'None'}")
             return None
 
         except Exception as e:
@@ -254,8 +339,8 @@ class TripletExtractor:
                 self.conn.execute("""
                     INSERT OR REPLACE INTO research_triplets
                     (paper_id, sample_num, research_goal, rubric, reference_solution,
-                     extraction_time_seconds, word_counts)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                     extraction_time_seconds, word_counts, full_text_length)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     paper_id,
                     i,
@@ -263,7 +348,8 @@ class TripletExtractor:
                     json.dumps(sample['rubric']),
                     sample['reference_solution'],
                     sample['extraction_time_seconds'],
-                    json.dumps(sample['word_counts'])
+                    json.dumps(sample['word_counts']),
+                    sample['full_text_length']
                 ))
                 self.conn.commit()
 
@@ -271,7 +357,11 @@ class TripletExtractor:
                 self.logger.error(f"Failed to save triplet {i} for paper {paper_id}: {e}")
 
     def run_extraction(self, num_papers: int, pilot_mode: bool = False) -> Dict:
-        """Run extraction pipeline."""
+        """
+        Run extraction pipeline.
+
+        Supports parallel processing if max_workers > 1 in config.
+        """
         papers = self.get_papers_to_process(num_papers, pilot_mode)
 
         if not papers:
@@ -283,24 +373,52 @@ class TripletExtractor:
             "triplets_extracted": 0,
             "papers_failed": 0,
             "avg_extraction_time": 0,
-            "total_time": 0
+            "total_time": 0,
+            "avg_full_text_length": 0
         }
 
         start_time = datetime.now()
 
-        for paper in tqdm(papers, desc="Extracting triplets"):
-            triplets = self.extract_triplets_from_paper(paper)
+        if self.max_workers > 1:
+            # Parallel extraction
+            self.logger.info(f"Using {self.max_workers} parallel workers")
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                future_to_paper = {
+                    executor.submit(self.extract_triplets_from_paper, paper): paper
+                    for paper in papers
+                }
 
-            if triplets:
-                self.save_triplets(paper['id'], triplets)
-                stats['papers_processed'] += 1
-                stats['triplets_extracted'] += len(triplets)
-            else:
-                stats['papers_failed'] += 1
+                for future in tqdm(as_completed(future_to_paper), total=len(papers), desc="Extracting"):
+                    paper = future_to_paper[future]
+                    try:
+                        triplets = future.result()
+                        if triplets:
+                            self.save_triplets(paper['id'], triplets)
+                            stats['papers_processed'] += 1
+                            stats['triplets_extracted'] += len(triplets)
+                            stats['avg_full_text_length'] += triplets[0]['full_text_length']
+                        else:
+                            stats['papers_failed'] += 1
+                    except Exception as e:
+                        self.logger.error(f"Exception processing paper {paper['id']}: {e}")
+                        stats['papers_failed'] += 1
+        else:
+            # Sequential extraction
+            for paper in tqdm(papers, desc="Extracting triplets"):
+                triplets = self.extract_triplets_from_paper(paper)
+
+                if triplets:
+                    self.save_triplets(paper['id'], triplets)
+                    stats['papers_processed'] += 1
+                    stats['triplets_extracted'] += len(triplets)
+                    stats['avg_full_text_length'] += triplets[0]['full_text_length']
+                else:
+                    stats['papers_failed'] += 1
 
         stats['total_time'] = (datetime.now() - start_time).total_seconds()
         if stats['papers_processed'] > 0:
             stats['avg_extraction_time'] = stats['total_time'] / stats['papers_processed']
+            stats['avg_full_text_length'] = stats['avg_full_text_length'] / stats['papers_processed']
 
         # Log summary
         self.logger.info("\n" + "="*60)
@@ -310,12 +428,13 @@ class TripletExtractor:
         self.logger.info(f"Triplets extracted: {stats['triplets_extracted']}")
         self.logger.info(f"Papers failed: {stats['papers_failed']}")
         self.logger.info(f"Avg time per paper: {stats['avg_extraction_time']:.1f}s")
+        self.logger.info(f"Avg full text length: {stats['avg_full_text_length']:.0f} chars")
         self.logger.info(f"Total time: {stats['total_time']/60:.1f} minutes")
 
         if pilot_mode:
             self.logger.info("\n" + "="*60)
-            self.logger.info("PILOT MODE: Review triplets in outputs/triplets/pilot/")
-            self.logger.info("Check quality before proceeding to full extraction")
+            self.logger.info("PILOT MODE: Review triplets in outputs/triplets/")
+            self.logger.info("Check for hallucinations (compare reference to paper)")
             self.logger.info("="*60)
 
         return stats
@@ -334,6 +453,7 @@ class TripletExtractor:
             rt.rubric,
             rt.reference_solution,
             rt.word_counts,
+            rt.full_text_length,
             p.title,
             p.year,
             prof.name as professor
@@ -357,7 +477,8 @@ class TripletExtractor:
                 "research_goal": row['research_goal'],
                 "rubric": json.loads(row['rubric']),
                 "reference_solution": row['reference_solution'],
-                "word_counts": json.loads(row['word_counts'])
+                "word_counts": json.loads(row['word_counts']),
+                "full_text_length": row['full_text_length']
             }
             triplets.append(triplet)
 
@@ -380,6 +501,7 @@ class TripletExtractor:
         goal_lengths = [t['word_counts']['goal'] for t in triplets]
         rubric_counts = [t['word_counts']['rubric_items'] for t in triplets]
         ref_lengths = [t['word_counts']['reference'] for t in triplets]
+        full_text_lengths = [t['full_text_length'] for t in triplets]
 
         return {
             "total_triplets": len(triplets),
@@ -402,12 +524,17 @@ class TripletExtractor:
                 "mean": sum(ref_lengths) / len(ref_lengths),
                 "min": min(ref_lengths),
                 "max": max(ref_lengths)
+            },
+            "full_text_length_stats": {
+                "mean": sum(full_text_lengths) / len(full_text_lengths),
+                "min": min(full_text_lengths),
+                "max": max(full_text_lengths)
             }
         }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Extract research triplets from papers")
+    parser = argparse.ArgumentParser(description="Extract research triplets from papers (v0.2.0)")
     parser.add_argument("--config", required=True, help="Path to configuration file")
     parser.add_argument("--num-papers", type=int, default=830, help="Number of papers to process")
     parser.add_argument("--pilot-mode", action="store_true", help="Run in pilot mode for quality review")
@@ -425,15 +552,16 @@ def main():
         extractor.export_triplets_to_json()
 
     # Return exit code based on success rate
-    success_rate = stats['papers_processed'] / (stats['papers_processed'] + stats['papers_failed'])
-    if success_rate < 0.8:
-        print(f"\nWARNING: Success rate {success_rate:.1%} < 80%")
-        print("Review extraction.log for errors")
-        sys.exit(1)
+    total_papers = stats['papers_processed'] + stats['papers_failed']
+    if total_papers > 0:
+        success_rate = stats['papers_processed'] / total_papers
+        if success_rate < 0.8:
+            print(f"\nWARNING: Success rate {success_rate:.1%} < 80%")
+            print("Review extraction.log for errors")
+            sys.exit(1)
 
     sys.exit(0)
 
 
 if __name__ == "__main__":
-    import time  # Import here to avoid circular imports
     main()
